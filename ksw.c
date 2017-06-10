@@ -344,58 +344,93 @@ static inline void revseq(int l, uint8_t *s)
 kswr_t ksw_cpu(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, const int8_t *mat, int o_del, int e_del, int o_ins, int e_ins, int xtra)
 {
 	kswr_t r = g_defr;
-	int16_t **H = (int16_t**)calloc(tlen+1, sizeof(int16_t*));
-	for(int j=0;j<tlen+1;j++)
-		H[j] = (int16_t*)calloc(qlen+1, sizeof(int16_t));
-	int16_t *E = (int16_t*)calloc(qlen,sizeof(int16_t));
-	int16_t *F = (int16_t*)calloc(tlen,sizeof(int16_t));
 
-	#define __max16u(a,b) ((a) > (b) ? (a):(b))
+	int *H = (int*)calloc(qlen+1,sizeof(int));
+	int *E = (int*)calloc(qlen+1,sizeof(int));
+	int *b, *bi;
+	int max = -1, max2 = -1, te2 = -1, end_i = -1, end_j = -1, n_b = 0, m_b = 0, minsc, endsc, low, high;
 
-	int i, j;
-
-	int oe_ins = o_ins + e_ins;
+	bi = (int*)calloc(tlen, sizeof(int));
+	b = (int*)calloc(tlen, sizeof(int));
+	minsc = (xtra&KSW_XSUBO)? xtra&0xffff : 0x10000;
+	endsc = (xtra&KSW_XSTOP)? xtra&0xffff : 0x10000;
+	int i, j, k;
 	int oe_del = o_del + e_del;
 
-	int max = 0, max2 = -1;
-	int te = -1, qe, te2;
-	for(i = 1; i < tlen+1; i++)
-	{
-		for(j = 1; j < qlen+1; j++)
-		{
-			E[j] = __max16u(E[j-1] - e_del, H[i][j-1] - oe_del);
-			F[i] = __max16u(F[i-1] - e_ins, H[i-1][j] - oe_ins);
-			H[i][j] = __max16u(0, H[i-1][j-1] + mat[query[j-1]*m + target[i-1]]);
-			H[i][j] = __max16u(H[i][j], E[j]);
-			H[i][j] = __max16u(H[i][j], F[i]);
+	int *qp; // query profile
+	qp = malloc(qlen * m * sizeof(int));
 
-			if(H[i][j] > max)
-			{
-				max = H[i][j];
-				te = i;
-				qe = j;
+	for (k = i = 0; k < m; ++k) {
+		const int8_t *p = &mat[k * m];
+		for (j = 0; j < qlen; ++j) qp[i++] = p[query[j]];
+	}
+
+	for(i = 0; i < tlen; i++)
+	{
+		int f = 0, h1 = 0, m = 0, mj = -1;
+		int *q = &qp[target[i] * qlen];
+		for(j = 0; j < qlen; j++)
+		{
+			int e = E[j], h = H[j];
+			H[j] = h1;
+			h += q[j];
+			h = h > e? h : e;
+			h = h > f? h : f;
+			h1 = h;
+			mj = m > h? mj : j;
+			m = m > h? m : h;
+			h -= (o_del + e_del);
+			h = (h > 0 ? h : 0);
+			e -= e_del;
+			e = e > h? e : h;
+			E[j] = e;
+			f -= e_ins;
+			f = f > h? f : h;
+		}
+
+		H[qlen] = h1; E[qlen] = 0;
+		if(m > max)
+		{
+			max = m;
+			end_i = i;
+			end_j = mj;
+			if (max >= endsc) break;
+		}
+
+		if (m >= minsc) {
+			if (n_b == 0 || bi[n_b-1] + 1 != i) {
+				bi[n_b] = i;
+				b[n_b++] = m;
 			}
-			else if(H[i][j] == max && j < qe) qe = j;
-			else if(H[i][j] > max2){
-				max2 = H[i][j];
-				te2 = i;
+			else if (b[n_b-1] < m) {
+				b[n_b-1] = m;
+				bi[n_b-1] = i; // modify the last
 			}
-			else if(H[i][j] == max2) te2 = i;
 		}
 	}
-	r.score = max;
-	r.te = te-1;
-	r.qe = qe-1;
 
-	r.te2 = te2-1;
-	r.score2 = max2;
-
-	free(E);
-	free(F);
-
-	for(int j=0;j<tlen+1;j++)
-		free(H[j]);
 	free(H);
+	free(E);
+	free(qp);
+
+	r.score = max;
+	r.score2 = max2;
+	r.te = end_i;
+	r.te2 = te2;
+	r.qe = end_j;
+	int mmax;
+	for (i = 0, mmax = 0; i < k; ++i) // get the max score
+		mmax = mmax > mat[i]? mmax : mat[i];
+	if (b) {
+		i = (r.score + mmax - 1) / mmax;
+		low = end_i - i; high = end_i + i;
+		for (i = 0; i < n_b; ++i) {
+			int e = bi[i];
+			if ((e < low || e > high) && b[i] > r.score2)
+				r.score2 = b[i], r.te2 = e;
+		}
+	}
+
 	return r;
 }
 
