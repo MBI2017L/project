@@ -28,7 +28,10 @@
 #include <assert.h>
 #include <stdio.h>
 #include <emmintrin.h>
+#include <unistd.h>
 #include "ksw.h"
+#include "kernel.cuh"
+
 
 #ifdef USE_MALLOC_WRAPPERS
 #  include "malloc_wrap.h"
@@ -341,30 +344,39 @@ static inline void revseq(int l, uint8_t *s)
 		t = s[i], s[i] = s[l - 1 - i], s[l - 1 - i] = t;
 }
 
+
+
+kswr_t ksw_cuda(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, const int8_t *mat, int o_del, int e_del, int o_ins, int e_ins, int xtra)
+{
+	kswr_t r = g_defr;
+	int max = -1, max2 = -1, te2 = -1, end_i = -1, end_j = -1, n_b = 0, m_b = 0, minsc, endsc, low, high;
+	minsc = (xtra&KSW_XSUBO)? xtra&0xffff : 0x10000;
+	endsc = (xtra&KSW_XSTOP)? xtra&0xffff : 0x10000;
+	r.score = sw_kernel(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, minsc, endsc);
+	return r;
+}
+
 kswr_t ksw_cpu(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, const int8_t *mat, int o_del, int e_del, int o_ins, int e_ins, int xtra)
 {
 	kswr_t r = g_defr;
 
 	int *H = (int*)calloc(qlen+1,sizeof(int));
 	int *E = (int*)calloc(qlen+1,sizeof(int));
-	int *b, *bi;
+	int *bi = (int*)calloc(tlen, sizeof(int));
+	int *b = (int*)calloc(tlen, sizeof(int));
+	int *qp = (int*)calloc(qlen * m, sizeof(int));
 	int max = -1, max2 = -1, te2 = -1, end_i = -1, end_j = -1, n_b = 0, m_b = 0, minsc, endsc, low, high;
 
-	bi = (int*)calloc(tlen, sizeof(int));
-	b = (int*)calloc(tlen, sizeof(int));
 	minsc = (xtra&KSW_XSUBO)? xtra&0xffff : 0x10000;
 	endsc = (xtra&KSW_XSTOP)? xtra&0xffff : 0x10000;
 	int i, j, k;
 	int oe_del = o_del + e_del;
 
-	int *qp; // query profile
-	qp = malloc(qlen * m * sizeof(int));
-
+	// generate the query profile
 	for (k = i = 0; k < m; ++k) {
 		const int8_t *p = &mat[k * m];
 		for (j = 0; j < qlen; ++j) qp[i++] = p[query[j]];
 	}
-
 	for(i = 0; i < tlen; i++)
 	{
 		int f = 0, h1 = 0, m = 0, mj = -1;
@@ -408,18 +420,16 @@ kswr_t ksw_cpu(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, const
 			}
 		}
 	}
-
-	free(H);
-	free(E);
 	free(qp);
-
+	free(E);
+	free(H);
 	r.score = max;
 	r.score2 = max2;
 	r.te = end_i;
 	r.te2 = te2;
 	r.qe = end_j;
 	int mmax;
-	for (i = 0, mmax = 0; i < k; ++i) // get the max score
+	for (i = 0, mmax = 0; i < m*m; ++i) // get the max score
 		mmax = mmax > mat[i]? mmax : mat[i];
 	if (b) {
 		i = (r.score + mmax - 1) / mmax;
@@ -430,7 +440,8 @@ kswr_t ksw_cpu(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, const
 				r.score2 = b[i], r.te2 = e;
 		}
 	}
-
+	free(b);
+	free(bi);
 	return r;
 }
 
@@ -446,17 +457,21 @@ kswr_t ksw_align2(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, co
 	func = q->size == 2? ksw_i16 : ksw_u8;
 	size = q->size;
 	r = func(q, tlen, target, o_del, e_del, o_ins, e_ins, xtra);
-	printf("\nksw_i16    : %d %d %d %d %d %d %d\n", r.tb, r.te, r.qb, r.qe, r.score, r.score2, r.te2);
+	printf("\nksw_i16    : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", r.tb, r.te, r.qb, r.qe, r.score, r.score2, r.te2);
+	r2 = ksw_cuda(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, xtra);
+	printf("ksw_cuda   : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", r2.tb, r2.te, r2.qb, r2.qe, r2.score, r2.score2, r2.te2);
 	r2 = ksw_cpu(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, xtra);
-	printf("ksw_cpu    : %d %d %d %d %d %d %d\n", r2.tb, r2.te, r2.qb, r2.qe, r2.score, r2.score2, r2.te2);
+	printf("ksw_cpu    : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", r2.tb, r2.te, r2.qb, r2.qe, r2.score, r2.score2, r2.te2);
 	if (qry == 0) free(q);
 	if ((xtra&KSW_XSTART) == 0 || ((xtra&KSW_XSUBO) && r.score < (xtra&0xffff))) return r;
 	revseq(r.qe + 1, query); revseq(r.te + 1, target); // +1 because qe/te points to the exact end, not the position after the end
 	q = ksw_qinit(size, r.qe + 1, query, m, mat);
 	rr = func(q, tlen, target, o_del, e_del, o_ins, e_ins, KSW_XSTOP | r.score);
-	printf("ksw_i16 rev: %d %d %d %d %d %d %d\n", rr.tb, rr.te, rr.qb, rr.qe, rr.score, rr.score2, rr.te2);
+	printf("ksw_i16 rev  : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", rr.tb, rr.te, rr.qb, rr.qe, rr.score, rr.score2, rr.te2);
+	rr2 = ksw_cuda(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, KSW_XSTOP | r.score);
+	printf("ksw_cuda rev : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", rr2.tb, rr2.te, rr2.qb, rr2.qe, rr2.score, rr2.score2, rr2.te2);
 	rr2 = ksw_cpu(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, KSW_XSTOP | r.score);
-	printf("ksw_cpu rev: %d %d %d %d %d %d %d\n", rr2.tb, rr2.te, rr2.qb, rr2.qe, rr2.score, rr2.score2, rr2.te2);
+	printf("ksw_cpu rev  : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", rr2.tb, rr2.te, rr2.qb, rr2.qe, rr2.score, rr2.score2, rr2.te2);
 	revseq(r.qe + 1, query); revseq(r.te + 1, target);
 	free(q);
 	if (r.score == rr.score)
@@ -464,8 +479,8 @@ kswr_t ksw_align2(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, co
 	if (r2.score == rr2.score)
 		r2.tb = r2.te - rr2.te, r2.qb = r2.qe - rr2.qe;
 
-	printf("res    : %d %d %d %d %d %d %d\n", r.tb, r.te, r.qb, r.qe, r.score, r.score2, r.te2);
-	printf("res_cpu: %d %d %d %d %d %d %d\n\n", r2.tb, r2.te, r2.qb, r2.qe, r2.score, r2.score2, r2.te2);
+	printf("res    : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", r.tb, r.te, r.qb, r.qe, r.score, r.score2, r.te2);
+	printf("res_cpu: tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n\n", r2.tb, r2.te, r2.qb, r2.qe, r2.score, r2.score2, r2.te2);
 	return r;
 }
 
@@ -489,8 +504,8 @@ int ksw_extend2(int qlen, const uint8_t *query, int tlen, const uint8_t *target,
 	int i, j, k, oe_del = o_del + e_del, oe_ins = o_ins + e_ins, beg, end, max, max_i, max_j, max_ins, max_del, max_ie, gscore, max_off;
 	assert(h0 > 0);
 	// allocate memory
-	qp = malloc(qlen * m);
-	eh = calloc(qlen + 1, 8);
+	qp = (int8_t*)malloc(qlen * m);
+	eh = (eh_t*)calloc(qlen + 1, 8);
 	// generate the query profile
 	for (k = i = 0; k < m; ++k) {
 		const int8_t *p = &mat[k * m];
@@ -599,7 +614,7 @@ static inline uint32_t *push_cigar(int *n_cigar, int *m_cigar, uint32_t *cigar, 
 	if (*n_cigar == 0 || op != (cigar[(*n_cigar) - 1]&0xf)) {
 		if (*n_cigar == *m_cigar) {
 			*m_cigar = *m_cigar? (*m_cigar)<<1 : 4;
-			cigar = realloc(cigar, (*m_cigar) << 2);
+			cigar = (uint32_t*)realloc(cigar, (*m_cigar) << 2);
 		}
 		cigar[(*n_cigar)++] = len<<4 | op;
 	} else cigar[(*n_cigar)-1] += len<<4;
@@ -615,9 +630,9 @@ int ksw_global2(int qlen, const uint8_t *query, int tlen, const uint8_t *target,
 	if (n_cigar_) *n_cigar_ = 0;
 	// allocate memory
 	n_col = qlen < 2*w+1? qlen : 2*w+1; // maximum #columns of the backtrack matrix
-	z = n_cigar_ && cigar_? malloc((long)n_col * tlen) : 0;
-	qp = malloc(qlen * m);
-	eh = calloc(qlen + 1, 8);
+	z = n_cigar_ && cigar_? (uint8_t*)malloc((long)n_col * tlen) : 0;
+	qp = (int8_t*)malloc(qlen * m);
+	eh = (eh_t* )calloc(qlen + 1, 8);
 	// generate the query profile
 	for (k = i = 0; k < m; ++k) {
 		const int8_t *p = &mat[k * m];
