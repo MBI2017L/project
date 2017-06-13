@@ -1,4 +1,3 @@
-
 /**
  * Copyright 1993-2012 NVIDIA Corporation.  All rights reserved.
  *
@@ -14,57 +13,51 @@
 
 #define MAX_SEQ_LEN 154
 
-
-__global__ void
-genqp_kernel(int *res, uint8_t *query, int qlen, int m, int8_t *mat)
-{
+__global__ void genqp_kernel(int *res, uint8_t *query, int qlen, int m,
+		int8_t *mat) {
 	int i = blockDim.x * blockIdx.x + threadIdx.x;
 
-	if (i < qlen)
-	{
-		for(int k = 0;k<m;++k)
+	if (i < qlen) {
+		for (int k = 0; k < m; ++k)
 			res[i + k * qlen] = mat[k * m + query[i]];
 	}
 }
 
-
-__device__ __forceinline__ short maxshort(short a, short b)
-{
+__device__ __forceinline__ short maxshort(short a, short b) {
 	return (a >= b) ? a : b;
 }
 
-__global__ void
-sw_kernel2(int* qp, int qlen, uint8_t *query, int tlen, uint8_t *target, int o_del, int e_del, short* H_d, int pitch, int iteration){
-	int n = ((tlen+1)>>1)*2;
+__global__ void sw_kernel2(int* qp, int qlen, uint8_t *query, int tlen,
+		uint8_t *target, int o_del, int e_del, short* H_d, int pitch,
+		int iteration) {
+
+	int n = ((tlen + 1) >> 1) * 2;
 	int j = threadIdx.x;
-	short* H = (short*)((char*)H_d);
-	short* H1 = (short*)((char*)H + pitch);
-	short* Hp = (short*)((char*)H1 + pitch); //rows
-	short* E = (short*)((char*)Hp + pitch); //cols
-	short* F = (short*)((char*)E + pitch); //rows
-	short* Fp = (short*)((char*)F + pitch); //rows
+	short* H = (short*) ((char*) H_d);
+	short* H1 = (short*) ((char*) H + pitch);
+	short* Hp = (short*) ((char*) H1 + pitch);
+	short* E = (short*) ((char*) Hp + pitch);
+	short* F = (short*) ((char*) E + pitch);
+	short* Fp = (short*) ((char*) F + pitch);
 
-
-	if (j > 0 && j <= tlen){
-		int *q = &qp[target[j-1] * qlen];
+	if (j > 0 && j <= tlen) {
+		int *q = &qp[target[j - 1] * qlen];
 		F[j] = maxshort(Fp[j], Hp[j] - o_del);
 		F[j] -= e_del;
-		H1[j] = maxshort(Hp[j-1] + q[iteration], F[j]);
+		H1[j] = maxshort(Hp[j - 1] + q[iteration], F[j]);
 		H1[j] = maxshort(H1[j], 0);
 		__syncthreads();
-		E[j] = maxshort(j*e_del, H1[j-1] +(j-1)*e_del);
+		E[j] = maxshort(j * e_del, H1[j - 1] + (j - 1) * e_del);
 	}
 
 	__syncthreads();
-	for (int offset = 1; offset < n; offset *= 2)
-	{
-		if (j >= offset && j<=tlen)
-		E[j] = maxshort(E[j], E[j - offset]);
+	for (int offset = 1; offset < n; offset *= 2) {
+		if (j >= offset && j <= tlen)
+			E[j] = maxshort(E[j], E[j - offset]);
 		__syncthreads();
 	}
 
-
-	if (j > 0 && j <= tlen){
+	if (j > 0 && j <= tlen) {
 		E[j] -= j * e_del;
 		H[j] = maxshort(H1[j], E[j] - o_del);
 		Hp[j] = H[j];
@@ -74,34 +67,35 @@ sw_kernel2(int* qp, int qlen, uint8_t *query, int tlen, uint8_t *target, int o_d
 }
 
 #define max(a,b) \
-  ({ __typeof__ (a) _a = (a); \
-      __typeof__ (b) _b = (b); \
-    _a > _b ? _a : _b; })
+		({ __typeof__ (a) _a = (a); \
+		__typeof__ (b) _b = (b); \
+		_a > _b ? _a : _b; })
 
-void runTest(int* qp, int qlen, uint8_t *query, int tlen, uint8_t *target,  int o_del, int e_del){
+void runTest(int* qp, int qlen, uint8_t *query, int tlen, uint8_t *target,
+		int o_del, int e_del) {
 
 	int H[512][512];
 	int H1[512][512];
 	int F[512][512];
 	int E[512][512];
 
-	for(int i = 0; i<= qlen; ++i)
-		for(int j = 0; j<=tlen;++j){
-			H[i][j]=0;
-			H1[i][j]=0;
-			F[i][j]=0;
-			E[i][j]=0;
+	for (int i = 0; i <= qlen; ++i)
+		for (int j = 0; j <= tlen; ++j) {
+			H[i][j] = 0;
+			H1[i][j] = 0;
+			F[i][j] = 0;
+			E[i][j] = 0;
 		}
 
-	for(int i = 1; i<=qlen; ++i){
-		for(int j = 1; j<=tlen;++j){
-			F[i][j] = max(F[i-1][j], H[i-1][j] - o_del);
+	for (int i = 1; i <= qlen; ++i) {
+		for (int j = 1; j <= tlen; ++j) {
+			F[i][j] = max(F[i - 1][j], H[i - 1][j] - o_del);
 			F[i][j] -= e_del;
-			H1[i][j] = max(H[i-1][j-1] +  qp[ target[j-1] * qlen + i - 1 ], F[i][j]);
+			H1[i][j] = max(H[i - 1][j - 1] + qp[target[j - 1] * qlen + i - 1], F[i][j]);
 			H1[i][j] = max(H1[i][j], 0);
-			for(int k=1;k<j;++k){
+			for (int k = 1; k < j; ++k) {
 				//printf("%d %d\n", H1[i][j-k], E[i][j]);
-				E[i][j] = max(H1[i][j-k] - k*e_del, E[i][j]);
+				E[i][j] = max(H1[i][j - k] - k * e_del, E[i][j]);
 			}
 			H[i][j] = max(H1[i][j], E[i][j] - o_del);
 			//printf("%d %d %d %d \t", H[i][j], H1[i][j], F[i][j], E[i][j]);
@@ -109,62 +103,73 @@ void runTest(int* qp, int qlen, uint8_t *query, int tlen, uint8_t *target,  int 
 		}
 		//printf("\n");
 	}
-//	for(int i = 0; i<=qlen; ++i){
-//		for(int j = 0; j<=tlen;++j){
-//			printf("%d ", H[i][j]);
-//		}
-//		printf("\n");
-//	}
-//	printf("\n");
+	//	for(int i = 0; i<=qlen; ++i){
+	//		for(int j = 0; j<=tlen;++j){
+	//			printf("%d ", H[i][j]);
+	//		}
+	//		printf("\n");
+	//	}
+	//	printf("\n");
 }
 
-kswr_t sw_kernel(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, const int8_t *mat, int o_del, int e_del, int o_ins, int e_ins, int minsc, int endsc){
-	checkCudaErrors(cudaSetDevice(0));
+kswr_t sw_kernel(int qlen, uint8_t *query, int tlen, uint8_t *target, int m,
+		const int8_t *mat, int o_del, int e_del, int o_ins, int e_ins,
+		int minsc, int endsc) {
+
+	int *qp = (int *) malloc(qlen * m * sizeof(int));
+	kswr_t r = { 0, -1, -1, -1, -1, -1, -1 };
+	int score = -1, te = -1, qe = -1, score2 = -1, te2 = -1;
+
 	uint8_t *query_d = NULL, *target_d = NULL;
 	int *qp_d = NULL;
 	int8_t *mat_d = NULL;
-	int *qp = (int *)malloc(qlen * m * sizeof(int));
-	kswr_t r = { 0, -1, -1, -1, -1, -1, -1 };
-	int score = -1, te = -1, qe = -1, score2 = -1, te2 = -1;
-	checkCudaErrors(cudaMalloc((void **)&query_d, qlen*sizeof(uint8_t)));
-	checkCudaErrors(cudaMalloc((void **)&mat_d, m*m*sizeof(int8_t)));
-	checkCudaErrors(cudaMalloc((void **)&qp_d, qlen*m*sizeof(int)));
-	checkCudaErrors(cudaMemcpy(query_d, query, qlen*sizeof(uint8_t), cudaMemcpyHostToDevice));
-	checkCudaErrors(cudaMemcpy(mat_d, mat, m*m*sizeof(int8_t), cudaMemcpyHostToDevice));
+	size_t pitch;
+	short *H, *H_d;
+
+	checkCudaErrors(cudaSetDevice(0));
+
+	checkCudaErrors(cudaMalloc((void ** )&query_d, qlen * sizeof(uint8_t)));
+	checkCudaErrors(cudaMalloc((void ** )&mat_d, m * m * sizeof(int8_t)));
+	checkCudaErrors(cudaMalloc((void ** )&qp_d, qlen * m * sizeof(int)));
+	checkCudaErrors(cudaMemcpy(query_d, query, qlen * sizeof(uint8_t), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemcpy(mat_d, mat, m * m * sizeof(int8_t), cudaMemcpyHostToDevice));
+
 	// ################# query profile
 	int threadsPerBlock = 256;
 	int blocksPerGrid = (qlen + threadsPerBlock - 1) / threadsPerBlock;
 	genqp_kernel<<<blocksPerGrid, threadsPerBlock>>>(qp_d, query_d, qlen, m, mat_d);
 	checkCudaErrors(cudaGetLastError());
-	checkCudaErrors(cudaMemcpy(qp, qp_d, m*qlen*sizeof(int), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(qp, qp_d, m * qlen * sizeof(int), cudaMemcpyDeviceToHost));
+
 	//runTest(qp, qlen, query, tlen, target, o_del, e_del);
+
 	int MAX_SIZE = 512;
-	if(tlen<MAX_SIZE){
-		size_t pitch;
-		short *H, *H_d;
-		H = (short*)malloc((tlen+1) * sizeof(short));
-		checkCudaErrors(cudaMalloc((void **)&target_d, tlen*sizeof(uint8_t)));
-		checkCudaErrors(cudaMallocPitch((void **)&H_d, &pitch, (tlen+1)*sizeof(short), 6));
-		checkCudaErrors(cudaMemset2D(H_d, pitch, 0, (tlen+1)*sizeof(short), 6));
-		checkCudaErrors(cudaMemcpy(target_d, target, tlen*sizeof(uint8_t), cudaMemcpyHostToDevice));
-		for(int i=0;i<qlen;++i){
+	if (tlen < MAX_SIZE) {
+		H = (short*) malloc((tlen + 1) * sizeof(short));
+		checkCudaErrors(cudaMalloc((void ** )&target_d, tlen * sizeof(uint8_t)));
+		checkCudaErrors(cudaMallocPitch((void ** )&H_d, &pitch, (tlen + 1) * sizeof(short), 6));
+		checkCudaErrors(cudaMemset2D(H_d, pitch, 0, (tlen + 1) * sizeof(short), 6));
+		checkCudaErrors(cudaMemcpy(target_d, target, tlen * sizeof(uint8_t), cudaMemcpyHostToDevice));
+
+		for (int i = 0; i < qlen; ++i) {
 			sw_kernel2<<<1, MAX_SIZE>>>(qp_d, qlen, query_d, tlen, target_d, o_del, e_del, H_d, pitch, i);
 			checkCudaErrors(cudaGetLastError());
-			checkCudaErrors(cudaMemcpy(H, H_d, (tlen+1)*sizeof(short), cudaMemcpyDeviceToHost));
+			checkCudaErrors(cudaMemcpy(H, H_d, (tlen + 1) * sizeof(short), cudaMemcpyDeviceToHost));
 			int ind = -1;
 			int max = -1;
-			for(int j = 0; j <= tlen; ++j)
-				if(H[j]>max) {
+			for (int j = 0; j <= tlen; ++j)
+				if (H[j] > max) {
 					max = H[j];
 					ind = j;
 				}
-			if(max>score) {
+			if (max > score) {
 				score = max;
 				te = ind;
 				qe = i;
 			}
 			//printf("%d %d\n", score, te);
 		}
+
 		free(H);
 		checkCudaErrors(cudaFree(target_d));
 		checkCudaErrors(cudaFree(H_d));
