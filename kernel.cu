@@ -10,6 +10,7 @@
 #include "kernel.cuh"
 #include <helper_cuda.h>
 #include <cuda_runtime.h>
+#include <helper_timer.h>
 
 #define MAX_SEQ_LEN 154
 
@@ -29,47 +30,103 @@ __device__ __forceinline__ short maxshort(short a, short b) {
 
 __global__ void sw_kernel2(int* qp, int qlen, uint8_t *query, int tlen,
 		uint8_t *target, int o_del, int e_del, short* H_d, int pitch,
-		int iteration) {
+		int minsc, int endsc, int* b, int* bi, int *results) {
+
+	int j = threadIdx.x;
 
 	int n = ((tlen + 1) >> 1) * 2;
-	int j = threadIdx.x;
-	short* H = (short*) ((char*) H_d);
-	short* H1 = (short*) ((char*) H + pitch);
-	short* Hp = (short*) ((char*) H1 + pitch);
-	short* E = (short*) ((char*) Hp + pitch);
-	short* F = (short*) ((char*) E + pitch);
-	short* Fp = (short*) ((char*) F + pitch);
+	short* H = (short*)((char*)H_d);
+	short* H1 = (short*)((char*)H + pitch);
+	short* Hp = (short*)((char*)H1 + pitch);
+	short* E = (short*)((char*)Hp + pitch);
+	short* F = (short*)((char*)E + pitch);
+	short* Fp = (short*)((char*)F + pitch);
 
-	if (j > 0 && j <= tlen) {
-		int *q = &qp[target[j - 1] * qlen];
-		F[j] = maxshort(Fp[j], Hp[j] - o_del);
-		F[j] -= e_del;
-		H1[j] = maxshort(Hp[j - 1] + q[iteration], F[j]);
-		H1[j] = maxshort(H1[j], 0);
+	__shared__ int iteration, max, ind, te_ind;
+	__shared__ bool anyoneBetter;
+
+	if (j == 0) {
+		iteration = 0;
+		te_ind = 0;
+		anyoneBetter = false;
+		results[0] = -1;	//score
+		results[1] = -1;	//te
+		results[2] = -1;	//qe
+		results[3] = -1;	//te_ind
+	}
+
+	while(iteration < qlen) {
+
+		if (j > 0 && j <= tlen) {
+			int *q = &qp[target[j - 1] * qlen];
+			F[j] = maxshort(Fp[j], Hp[j] - o_del);
+			F[j] -= e_del;
+			H1[j] = maxshort(Hp[j - 1] + q[iteration], F[j]);
+			H1[j] = maxshort(H1[j], 0);
+			__syncthreads();
+			E[j] = maxshort(j * e_del, H1[j - 1] + (j - 1) * e_del);
+		}
+
 		__syncthreads();
-		E[j] = maxshort(j * e_del, H1[j - 1] + (j - 1) * e_del);
-	}
+		for (int offset = 1; offset < n; offset *= 2) {
+			if (j >= offset && j <= tlen)
+				E[j] = maxshort(E[j], E[j - offset]);
+			__syncthreads();
+		}
 
-	__syncthreads();
-	for (int offset = 1; offset < n; offset *= 2) {
-		if (j >= offset && j <= tlen)
-			E[j] = maxshort(E[j], E[j - offset]);
+		if (j > 0 && j <= tlen) {
+			E[j] -= j * e_del;
+			H[j] = maxshort(H1[j], E[j] - o_del);
+			Hp[j] = H[j];
+			Fp[j] = F[j];
+			if (H[j] > results[0]) anyoneBetter = true;
+		}
+		__syncthreads();
+
+		if (j == 0) {
+			if (anyoneBetter) {
+
+				ind = -1;
+				max = -1;
+				for (int k = 0; k <= tlen; ++k) {
+					if (H[k] > max) {
+						max = H[k];
+						ind = k;
+
+						if (max >= minsc) {
+							if (te_ind == 0 || bi[te_ind - 1] + 1 != ind) {
+								b[te_ind] = max;
+								bi[te_ind++] = ind;
+							}
+							else if (max > b[te_ind - 1]) {
+								b[te_ind - 1] = max;
+								bi[te_ind - 1] = ind;
+							}
+						}
+					}
+				}
+
+				if (max > results[0]) {
+					results[0] = max;
+					results[1] = ind - 1;
+					results[2] = iteration;
+					results[3] = te_ind;
+
+					if (max >= endsc) iteration = qlen;
+				}
+
+			}
+			iteration++;
+			anyoneBetter = false;
+		}
 		__syncthreads();
 	}
-
-	if (j > 0 && j <= tlen) {
-		E[j] -= j * e_del;
-		H[j] = maxshort(H1[j], E[j] - o_del);
-		Hp[j] = H[j];
-		Fp[j] = F[j];
-	}
-
 }
 
-#define max(a,b) \
+/*#define max(a,b) \
 		({ __typeof__ (a) _a = (a); \
 		__typeof__ (b) _b = (b); \
-		_a > _b ? _a : _b; })
+		_a > _b ? _a : _b; })*/
 
 void runTest(int* qp, int qlen, uint8_t *query, int tlen, uint8_t *target,
 		int o_del, int e_del) {
@@ -112,83 +169,81 @@ void runTest(int* qp, int qlen, uint8_t *query, int tlen, uint8_t *target,
 	//	printf("\n");
 }
 
+
+int nextPow2( int x ) {
+    --x;
+    x |= x >> 1;
+    x |= x >> 2;
+    x |= x >> 4;
+    x |= x >> 8;
+    x |= x >> 16;
+    return ++x;
+}
+
+
 kswr_t sw_kernel(int qlen, uint8_t *query, int tlen, uint8_t *target, int m,
 		const int8_t *mat, int o_del, int e_del, int o_ins, int e_ins,
 		int minsc, int endsc) {
 
 	int *qp = (int *) malloc(qlen * m * sizeof(int));
 	kswr_t r = { 0, -1, -1, -1, -1, -1, -1 };
-	int score = -1, te = -1, qe = -1, score2 = -1, te2 = -1;
-	int *b = (int *)malloc(tlen*qlen*sizeof(int));
-	int *bi = (int *)malloc(tlen*qlen*sizeof(int));
-	int te_ind = 0;
+
 	uint8_t *query_d = NULL, *target_d = NULL;
 	int *qp_d = NULL;
 	int8_t *mat_d = NULL;
 	size_t pitch;
-	short *H, *H_d;
+	short *H_d;
+	cudaDeviceProp prop;
+	cudaGetDeviceProperties(&prop, 0);
 
-	checkCudaErrors(cudaSetDevice(0));
+	if(tlen < 512){
 
-	checkCudaErrors(cudaMalloc((void ** )&query_d, qlen * sizeof(uint8_t)));
-	checkCudaErrors(cudaMalloc((void ** )&mat_d, m * m * sizeof(int8_t)));
-	checkCudaErrors(cudaMalloc((void ** )&qp_d, qlen * m * sizeof(int)));
-	checkCudaErrors(cudaMemcpy(query_d, query, qlen * sizeof(uint8_t), cudaMemcpyHostToDevice));
-	checkCudaErrors(cudaMemcpy(mat_d, mat, m * m * sizeof(int8_t), cudaMemcpyHostToDevice));
+		checkCudaErrors(cudaSetDevice(0));
 
-	// ################# query profile
-	int threadsPerBlock = 256;
-	int blocksPerGrid = (qlen + threadsPerBlock - 1) / threadsPerBlock;
-	genqp_kernel<<<blocksPerGrid, threadsPerBlock>>>(qp_d, query_d, qlen, m, mat_d);
-	checkCudaErrors(cudaGetLastError());
-	checkCudaErrors(cudaMemcpy(qp, qp_d, m * qlen * sizeof(int), cudaMemcpyDeviceToHost));
+		checkCudaErrors(cudaMalloc((void ** )&query_d, qlen * sizeof(uint8_t)));
+		checkCudaErrors(cudaMalloc((void ** )&mat_d, m * m * sizeof(int8_t)));
+		checkCudaErrors(cudaMalloc((void ** )&qp_d, qlen * m * sizeof(int)));
+		checkCudaErrors(cudaMemcpy(query_d, query, qlen * sizeof(uint8_t), cudaMemcpyHostToDevice));
+		checkCudaErrors(cudaMemcpy(mat_d, mat, m * m * sizeof(int8_t), cudaMemcpyHostToDevice));
 
-	//runTest(qp, qlen, query, tlen, target, o_del, e_del);
+		// ################# query profile
+		int threadsPerBlock = 256;
+		int blocksPerGrid = (qlen + threadsPerBlock - 1) / threadsPerBlock;
+		genqp_kernel<<<blocksPerGrid, threadsPerBlock>>>(qp_d, query_d, qlen, m, mat_d);
+		checkCudaErrors(cudaGetLastError());
+		checkCudaErrors(cudaMemcpy(qp, qp_d, m * qlen * sizeof(int), cudaMemcpyDeviceToHost));
 
-	int MAX_SIZE = 512;
-	if (tlen < MAX_SIZE) {
-		H = (short*) malloc((tlen + 1) * sizeof(short));
+		//runTest(qp, qlen, query, tlen, target, o_del, e_del);
+
 		checkCudaErrors(cudaMalloc((void ** )&target_d, tlen * sizeof(uint8_t)));
 		checkCudaErrors(cudaMallocPitch((void ** )&H_d, &pitch, (tlen + 1) * sizeof(short), 6));
 		checkCudaErrors(cudaMemset2D(H_d, pitch, 0, (tlen + 1) * sizeof(short), 6));
 		checkCudaErrors(cudaMemcpy(target_d, target, tlen * sizeof(uint8_t), cudaMemcpyHostToDevice));
 
-		for (int i = 0; i < qlen; ++i) {
-			sw_kernel2<<<1, MAX_SIZE>>>(qp_d, qlen, query_d, tlen, target_d, o_del, e_del, H_d, pitch, i);
-			checkCudaErrors(cudaGetLastError());
-			checkCudaErrors(cudaMemcpy(H, H_d, (tlen + 1) * sizeof(short), cudaMemcpyDeviceToHost));
-			int ind = -1;
-			int max = -1;
-			for (int j = 0; j <= tlen; ++j){
-				if (H[j] > max) {
-					max = H[j];
-					ind = j;
-					if(max >= minsc){
-						if(te_ind == 0 ||  bi[te_ind-1] + 1 != ind){
-							b[te_ind] = max;
-							bi[te_ind++] = ind;
-						}
-						else if(max > b[te_ind-1]){
-							b[te_ind-1] = max;
-							bi[te_ind-1] = ind;
-						}
-					}
-				}
-			}
-			if (max > score) {
-				score = max;
-				te = ind;
-				qe = i;
-				if(score >= endsc) break;
-			}
-		}
+		int *b_d, *bi_d;
+		int *b = (int *)malloc(tlen * sizeof(int));
+		int *bi = (int *)malloc(tlen * sizeof(int));
+		checkCudaErrors(cudaMalloc((void **)&b_d, tlen * sizeof(int)));
+		checkCudaErrors(cudaMalloc((void **)&bi_d, tlen * sizeof(int)));
 
-		r.score = score;
-		r.te = te - 1;
-		r.qe = qe;
+		int *results_d;
+		checkCudaErrors(cudaMalloc((void **)&results_d, 4 * sizeof(int)));
+		sw_kernel2<<<1, nextPow2(tlen)>>>(qp_d, qlen, query_d, tlen, target_d, o_del, e_del, H_d, pitch, minsc, endsc, b_d, bi_d, results_d);
+		checkCudaErrors(cudaGetLastError());
+
+		int *results = (int*)malloc(4 * sizeof(int));
+		checkCudaErrors(cudaMemcpy(results, results_d, 4 * sizeof(int), cudaMemcpyDeviceToHost));
+		r.score = results[0];
+		r.te = results[1];
+		r.qe = results[2];
+
+		int te_ind = results[3];
+		checkCudaErrors(cudaMemcpy(b, b_d, tlen * sizeof(int), cudaMemcpyDeviceToHost));
+		checkCudaErrors(cudaMemcpy(bi, bi_d, tlen * sizeof(int), cudaMemcpyDeviceToHost));
+
 		int mmax = 0;
 		for (int i = 0; i < m*m; ++i) // get the max score
-			mmax = mmax > mat[i]? mmax : mat[i];
+			mmax = mmax > mat[i] ? mmax : mat[i];
 		if (te_ind>0) {
 			int i = (r.score + mmax - 1) / mmax;
 			int low = r.te - i; int high = r.te + i;
@@ -204,11 +259,11 @@ kswr_t sw_kernel(int qlen, uint8_t *query, int tlen, uint8_t *target, int m,
 		checkCudaErrors(cudaFree(query_d));
 		checkCudaErrors(cudaFree(qp_d));
 		checkCudaErrors(cudaFree(mat_d));
+		checkCudaErrors(cudaFree(results_d));
+		checkCudaErrors(cudaFree(b_d));
+		checkCudaErrors(cudaFree(bi_d));
 		checkCudaErrors(cudaDeviceReset());
-		free(qp);
-		free(H);
-		free(b);
-		free(bi);
 	}
+	free(qp);
 	return r;
 }

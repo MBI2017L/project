@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <emmintrin.h>
 #include <unistd.h>
+#include <time.h>
 #include "ksw.h"
 #include "kernel.cuh"
 
@@ -452,26 +453,70 @@ kswr_t ksw_align2(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, co
 	kswr_t r, rr, r2, rr2;
 	kswr_t (*func)(kswq_t*, int, const uint8_t*, int, int, int, int, int);
 
+	clock_t begin,end;
 	q = (qry && *qry)? *qry : ksw_qinit((xtra&KSW_XBYTE)? 1 : 2, qlen, query, m, mat);
 	if (qry && *qry == 0) *qry = q;
 	func = q->size == 2? ksw_i16 : ksw_u8;
 	size = q->size;
+
+	begin = clock();
 	r = func(q, tlen, target, o_del, e_del, o_ins, e_ins, xtra);
+	end = clock();
+	double time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 	printf("\nksw_i16    : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", r.tb, r.te, r.qb, r.qe, r.score, r.score2, r.te2);
+	printf ("time taken %.10lf seconds.\n\n", time_spent );
+
+
+
+	begin = clock();
 	r2 = ksw_cuda(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, xtra);
+	end = clock();
+	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 	printf("ksw_cuda   : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", r2.tb, r2.te, r2.qb, r2.qe, r2.score, r2.score2, r2.te2);
+	printf ("time taken %.10lf seconds.\n\n", time_spent );
+
+
+
+	begin = clock();
 	r2 = ksw_cpu(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, xtra);
+	end = clock();
+	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 	printf("ksw_cpu    : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", r2.tb, r2.te, r2.qb, r2.qe, r2.score, r2.score2, r2.te2);
+	printf ("time taken %.10lf seconds.\n\n", time_spent );
+
+
+
+
 	if (qry == 0) free(q);
 	if ((xtra&KSW_XSTART) == 0 || ((xtra&KSW_XSUBO) && r.score < (xtra&0xffff))) return r;
 	revseq(r.qe + 1, query); revseq(r.te + 1, target); // +1 because qe/te points to the exact end, not the position after the end
 	q = ksw_qinit(size, r.qe + 1, query, m, mat);
+
+
+	begin = clock();
 	rr = func(q, tlen, target, o_del, e_del, o_ins, e_ins, KSW_XSTOP | r.score);
+	end = clock();
+	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 	printf("ksw_i16 rev  : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", rr.tb, rr.te, rr.qb, rr.qe, rr.score, rr.score2, rr.te2);
+	printf ("time taken %.10lf seconds.\n\n", time_spent );
+
+
+	begin = clock();
 	rr2 = ksw_cuda(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, KSW_XSTOP | r.score);
+	end = clock();
+	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 	printf("ksw_cuda rev : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", rr2.tb, rr2.te, rr2.qb, rr2.qe, rr2.score, rr2.score2, rr2.te2);
+	printf ("time taken %.10lf seconds.\n\n", time_spent );
+
+
+	begin = clock();
 	rr2 = ksw_cpu(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, KSW_XSTOP | r.score);
+	end = clock();
+	time_spent = (double)(end - begin) / CLOCKS_PER_SEC;
 	printf("ksw_cpu rev  : tb: %d te:%d qb:%d qe:%d score:%d score2:%d te2:%d\n", rr2.tb, rr2.te, rr2.qb, rr2.qe, rr2.score, rr2.score2, rr2.te2);
+	printf ("time taken %.10lf seconds.\n\n", time_spent );
+
+
 	revseq(r.qe + 1, query); revseq(r.te + 1, target);
 	free(q);
 	if (r.score == rr.score)
