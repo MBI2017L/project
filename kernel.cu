@@ -119,7 +119,9 @@ kswr_t sw_kernel(int qlen, uint8_t *query, int tlen, uint8_t *target, int m,
 	int *qp = (int *) malloc(qlen * m * sizeof(int));
 	kswr_t r = { 0, -1, -1, -1, -1, -1, -1 };
 	int score = -1, te = -1, qe = -1, score2 = -1, te2 = -1;
-
+	int *b = (int *)malloc(tlen*qlen*sizeof(int));
+	int *bi = (int *)malloc(tlen*qlen*sizeof(int));
+	int te_ind = 0;
 	uint8_t *query_d = NULL, *target_d = NULL;
 	int *qp_d = NULL;
 	int8_t *mat_d = NULL;
@@ -157,31 +159,56 @@ kswr_t sw_kernel(int qlen, uint8_t *query, int tlen, uint8_t *target, int m,
 			checkCudaErrors(cudaMemcpy(H, H_d, (tlen + 1) * sizeof(short), cudaMemcpyDeviceToHost));
 			int ind = -1;
 			int max = -1;
-			for (int j = 0; j <= tlen; ++j)
+			for (int j = 0; j <= tlen; ++j){
 				if (H[j] > max) {
 					max = H[j];
 					ind = j;
+					if(max >= minsc){
+						if(te_ind == 0 ||  bi[te_ind-1] + 1 != ind){
+							b[te_ind] = max;
+							bi[te_ind++] = ind;
+						}
+						else if(max > b[te_ind-1]){
+							b[te_ind-1] = max;
+							bi[te_ind-1] = ind;
+						}
+					}
 				}
+			}
 			if (max > score) {
 				score = max;
 				te = ind;
 				qe = i;
+				if(score >= endsc) break;
 			}
-			//printf("%d %d\n", score, te);
 		}
 
-		free(H);
+		r.score = score;
+		r.te = te - 1;
+		r.qe = qe;
+		int mmax = 0;
+		for (int i = 0; i < m*m; ++i) // get the max score
+			mmax = mmax > mat[i]? mmax : mat[i];
+		if (te_ind>0) {
+			int i = (r.score + mmax - 1) / mmax;
+			int low = r.te - i; int high = r.te + i;
+			for (i = 0; i < te_ind; ++i) {
+				int e = bi[i];
+				if ((e < low || e > high) && b[i] > r.score2)
+					r.score2 = b[i], r.te2 = e;
+			}
+		}
+
 		checkCudaErrors(cudaFree(target_d));
 		checkCudaErrors(cudaFree(H_d));
+		checkCudaErrors(cudaFree(query_d));
+		checkCudaErrors(cudaFree(qp_d));
+		checkCudaErrors(cudaFree(mat_d));
+		checkCudaErrors(cudaDeviceReset());
+		free(qp);
+		free(H);
+		free(b);
+		free(bi);
 	}
-
-	checkCudaErrors(cudaFree(query_d));
-	checkCudaErrors(cudaFree(qp_d));
-	checkCudaErrors(cudaFree(mat_d));
-	checkCudaErrors(cudaDeviceReset());
-	free(qp);
-	r.score = score;
-	r.te = te - 1;
-	r.qe = qe;
 	return r;
 }
