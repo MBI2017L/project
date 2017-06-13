@@ -352,7 +352,7 @@ kswr_t ksw_cuda(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, cons
 	int max = -1, max2 = -1, te2 = -1, end_i = -1, end_j = -1, n_b = 0, m_b = 0, minsc, endsc, low, high;
 	minsc = (xtra&KSW_XSUBO)? xtra&0xffff : 0x10000;
 	endsc = (xtra&KSW_XSTOP)? xtra&0xffff : 0x10000;
-	r.score = sw_kernel(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, minsc, endsc);
+	r = sw_kernel(qlen, query, tlen, target, m, mat, o_del, e_del, o_ins, e_ins, minsc, endsc);
 	return r;
 }
 
