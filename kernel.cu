@@ -12,7 +12,15 @@
 #include <cuda_runtime.h>
 #include <helper_timer.h>
 
-#define MAX_SEQ_LEN 154
+#define MAX_LEN 512
+
+uint8_t *query_d = NULL, *target_d = NULL;
+int *qp_d = NULL;
+int8_t *mat_d = NULL;
+size_t pitch;
+short *H_d;
+int *results_d;
+int *b_d, *bi_d;
 
 __global__ void genqp_kernel(int *res, uint8_t *query, int qlen, int m,
 		int8_t *mat) {
@@ -131,10 +139,10 @@ __global__ void sw_kernel2(int* qp, int qlen, uint8_t *query, int tlen,
 void runTest(int* qp, int qlen, uint8_t *query, int tlen, uint8_t *target,
 		int o_del, int e_del) {
 
-	int H[512][512];
-	int H1[512][512];
-	int F[512][512];
-	int E[512][512];
+	int H[MAX_LEN][MAX_LEN];
+	int H1[MAX_LEN][MAX_LEN];
+	int F[MAX_LEN][MAX_LEN];
+	int E[MAX_LEN][MAX_LEN];
 
 	for (int i = 0; i <= qlen; ++i)
 		for (int j = 0; j <= tlen; ++j) {
@@ -180,6 +188,33 @@ int nextPow2( int x ) {
     return ++x;
 }
 
+void initCUDA(){
+
+	checkCudaErrors(cudaSetDevice(0));
+
+	checkCudaErrors(cudaMalloc((void ** )&query_d, MAX_LEN * sizeof(uint8_t)));
+	checkCudaErrors(cudaMalloc((void ** )&mat_d, MAX_LEN * MAX_LEN * sizeof(int8_t)));
+	checkCudaErrors(cudaMalloc((void ** )&qp_d, MAX_LEN * MAX_LEN * sizeof(int)));
+	checkCudaErrors(cudaMalloc((void ** )&target_d, MAX_LEN * sizeof(uint8_t)));
+	checkCudaErrors(cudaMallocPitch((void ** )&H_d, &pitch, MAX_LEN * sizeof(short), 6));
+
+	checkCudaErrors(cudaMalloc((void **)&b_d, MAX_LEN * sizeof(int)));
+	checkCudaErrors(cudaMalloc((void **)&bi_d, MAX_LEN * sizeof(int)));
+
+	checkCudaErrors(cudaMalloc((void **)&results_d, 4 * sizeof(int)));
+}
+
+void freeCUDA(){
+	checkCudaErrors(cudaFree(target_d));
+	checkCudaErrors(cudaFree(H_d));
+	checkCudaErrors(cudaFree(query_d));
+	checkCudaErrors(cudaFree(qp_d));
+	checkCudaErrors(cudaFree(mat_d));
+	checkCudaErrors(cudaFree(results_d));
+	checkCudaErrors(cudaFree(b_d));
+	checkCudaErrors(cudaFree(bi_d));
+}
+
 
 kswr_t sw_kernel(int qlen, uint8_t *query, int tlen, uint8_t *target, int m,
 		const int8_t *mat, int o_del, int e_del, int o_ins, int e_ins,
@@ -187,22 +222,17 @@ kswr_t sw_kernel(int qlen, uint8_t *query, int tlen, uint8_t *target, int m,
 
 	int *qp = (int *) malloc(qlen * m * sizeof(int));
 	kswr_t r = { 0, -1, -1, -1, -1, -1, -1 };
-
-	uint8_t *query_d = NULL, *target_d = NULL;
-	int *qp_d = NULL;
-	int8_t *mat_d = NULL;
-	size_t pitch;
-	short *H_d;
 	cudaDeviceProp prop;
 	cudaGetDeviceProperties(&prop, 0);
 
-	if(tlen < 512){
 
-		checkCudaErrors(cudaSetDevice(0));
+	//runTest(qp, qlen, query, tlen, target, o_del, e_del);
+	if(tlen < MAX_LEN){
 
-		checkCudaErrors(cudaMalloc((void ** )&query_d, qlen * sizeof(uint8_t)));
-		checkCudaErrors(cudaMalloc((void ** )&mat_d, m * m * sizeof(int8_t)));
-		checkCudaErrors(cudaMalloc((void ** )&qp_d, qlen * m * sizeof(int)));
+		int *b = (int *)malloc(tlen * sizeof(int));
+		int *bi = (int *)malloc(tlen * sizeof(int));
+		int *results = (int*)malloc(4 * sizeof(int));
+
 		checkCudaErrors(cudaMemcpy(query_d, query, qlen * sizeof(uint8_t), cudaMemcpyHostToDevice));
 		checkCudaErrors(cudaMemcpy(mat_d, mat, m * m * sizeof(int8_t), cudaMemcpyHostToDevice));
 
@@ -212,26 +242,12 @@ kswr_t sw_kernel(int qlen, uint8_t *query, int tlen, uint8_t *target, int m,
 		genqp_kernel<<<blocksPerGrid, threadsPerBlock>>>(qp_d, query_d, qlen, m, mat_d);
 		checkCudaErrors(cudaGetLastError());
 		checkCudaErrors(cudaMemcpy(qp, qp_d, m * qlen * sizeof(int), cudaMemcpyDeviceToHost));
-
-		//runTest(qp, qlen, query, tlen, target, o_del, e_del);
-
-		checkCudaErrors(cudaMalloc((void ** )&target_d, tlen * sizeof(uint8_t)));
-		checkCudaErrors(cudaMallocPitch((void ** )&H_d, &pitch, (tlen + 1) * sizeof(short), 6));
-		checkCudaErrors(cudaMemset2D(H_d, pitch, 0, (tlen + 1) * sizeof(short), 6));
 		checkCudaErrors(cudaMemcpy(target_d, target, tlen * sizeof(uint8_t), cudaMemcpyHostToDevice));
+		checkCudaErrors(cudaMemset2D(H_d, pitch, 0, (tlen + 1) * sizeof(short), 6));
 
-		int *b_d, *bi_d;
-		int *b = (int *)malloc(tlen * sizeof(int));
-		int *bi = (int *)malloc(tlen * sizeof(int));
-		checkCudaErrors(cudaMalloc((void **)&b_d, tlen * sizeof(int)));
-		checkCudaErrors(cudaMalloc((void **)&bi_d, tlen * sizeof(int)));
-
-		int *results_d;
-		checkCudaErrors(cudaMalloc((void **)&results_d, 4 * sizeof(int)));
 		sw_kernel2<<<1, nextPow2(tlen)>>>(qp_d, qlen, query_d, tlen, target_d, o_del, e_del, H_d, pitch, minsc, endsc, b_d, bi_d, results_d);
 		checkCudaErrors(cudaGetLastError());
 
-		int *results = (int*)malloc(4 * sizeof(int));
 		checkCudaErrors(cudaMemcpy(results, results_d, 4 * sizeof(int), cudaMemcpyDeviceToHost));
 		r.score = results[0];
 		r.te = results[1];
@@ -253,16 +269,6 @@ kswr_t sw_kernel(int qlen, uint8_t *query, int tlen, uint8_t *target, int m,
 					r.score2 = b[i], r.te2 = e;
 			}
 		}
-
-		checkCudaErrors(cudaFree(target_d));
-		checkCudaErrors(cudaFree(H_d));
-		checkCudaErrors(cudaFree(query_d));
-		checkCudaErrors(cudaFree(qp_d));
-		checkCudaErrors(cudaFree(mat_d));
-		checkCudaErrors(cudaFree(results_d));
-		checkCudaErrors(cudaFree(b_d));
-		checkCudaErrors(cudaFree(bi_d));
-		checkCudaErrors(cudaDeviceReset());
 	}
 	free(qp);
 	return r;

@@ -846,6 +846,8 @@ int main(int argc, char *argv[])
 	// open file
 	fpt = xzopen(argv[optind],   "r"); kst = kseq_init(fpt);
 	fpq = xzopen(argv[optind+1], "r"); ksq = kseq_init(fpq);
+
+	initCUDA();
 	// all-pair alignment
 	while (kseq_read(ksq) > 0) {
 		kswq_t *q[2] = {0, 0};
@@ -873,6 +875,8 @@ int main(int argc, char *argv[])
 		}
 		free(q[0]); free(q[1]);
 	}
+
+	freeCUDA();
 	free(rseq);
 	kseq_destroy(kst); err_gzclose(fpt);
 	kseq_destroy(ksq); err_gzclose(fpq);
